@@ -1,0 +1,302 @@
+# All imports and configuration
+import numpy as np
+import pandas as pd
+import matplotlib
+import matplotlib.pyplot as plt
+import matplotlib.patches as mpatches
+import matplotlib.gridspec as gridspec
+import matplotlib.lines as mlines
+from matplotlib.ticker import FuncFormatter, LogLocator, NullFormatter
+import seaborn as sns
+from pyxlsb import open_workbook
+import warnings
+
+COL_PETRO = '#E69F00'   # warm orange  — petroleum
+COL_GAS   = '#56B4E9'   # sky blue     — natural gas
+COL_COAL  = '#888888'   # neutral grey — coal
+COL_EXP   = '#0072B2'   # deep blue    — explicit subsidy endpoint
+COL_IMP   = '#D55E00'   # vermilion    — implicit subsidy endpoint
+COL_LINE  = '#CCCCCC'   # connector line in dumbbell
+
+# ── Paul Tol "bright" — 7-class colorblind-safe for region encoding ───────────
+REGION_COLORS = {
+    'East Asia & Pacific':        '#4477AA',
+    'Europe & Central Asia':      '#AA3377',
+    'Latin America & Caribbean':  '#228833',
+    'Middle East & North Africa': '#CCBB44',
+    'North America':              '#66CCEE',
+    'South Asia':                 '#EE6677',
+    'Sub-Saharan Africa':         '#BBBBBB',
+}
+REGION_SHORT = {
+    'East Asia & Pacific':        'E. Asia & Pacific',
+    'Europe & Central Asia':      'Europe & C. Asia',
+    'Latin America & Caribbean':  'Lat. Am. & Carib.',
+    'Middle East & North Africa': 'MENA',
+    'North America':              'North America',
+    'South Asia':                 'South Asia',
+    'Sub-Saharan Africa':         'Sub-Saharan Africa',
+}
+def read_rows(wb, sheet, max_rows=300):
+    rows = []
+    with wb.get_sheet(sheet) as ws:
+        for i, row in enumerate(ws.rows()):
+            if i >= max_rows:
+                break
+            rows.append([c.v for c in row])
+    return rows
+
+with open_workbook(FILE_PATH) as wb:
+    exp_rows  = read_rows(wb, 'All_Explicit')
+    imp_rows  = read_rows(wb, 'All_Implicit')
+    meta_rows = read_rows(wb, 'lists')
+
+# Metadata: country, ISO code, region
+meta = [
+    {'country': r[0], 'code': r[1].lower() if r[1] else None, 'region': r[2]}
+    for r in meta_rows[1:] if isinstance(r[0], str)
+]
+df_meta = pd.DataFrame(meta)
+
+# Explicit subsidies: [11]=petro_total, [15]=gas_total, [19]=coal_total
+exp_data = []
+for row in exp_rows[4:]:
+    if not isinstance(row[1], str) or not isinstance(row[2], str):
+        continue
+    p = safe(row[11]); g = safe(row[15]); c = safe(row[19])
+    exp_data.append({'code': row[1], 'country': row[2],
+                     'exp_petro': p, 'exp_gas': g, 'exp_coal': c,
+                     'total_explicit': p + g + c})
+df_exp = pd.DataFrame(exp_data)
+
+# Implicit subsidies: [9]=petro, [11]=gas, [13]=coal, [15]=total
+imp_data = []
+for row in imp_rows[3:]:
+    if not isinstance(row[1], str) or not isinstance(row[2], str):
+        continue
+    imp_data.append({'code': row[1], 'country': row[2],
+                     'imp_petro': safe(row[9]),
+                     'imp_gas':   safe(row[11]),
+                     'imp_coal':  safe(row[13]),
+                     'total_implicit': safe(row[15])})
+df_imp = pd.DataFrame(imp_data)
+
+# Master merge
+df = (df_exp
+      .merge(df_imp, on=['code', 'country'], how='outer')
+      .merge(df_meta[['code', 'region']], on='code', how='left'))
+df['total_combined'] = df['total_explicit'].fillna(0) + df['total_implicit'].fillna(0)
+
+# Global totals
+G_EXP  = df['total_explicit'].sum()
+G_IMP  = df['total_implicit'].sum()
+G_COMB = df['total_combined'].sum()
+
+# Unified Top-N: one ranking used across all four panels
+unified = (df.nlargest(TOP_N, 'total_combined')
+             .sort_values('total_combined', ascending=True)
+             .reset_index(drop=True))
+
+unified['label'] = (unified['country']
+    .str.replace('United States', 'United States')
+    .str.replace('United Kingdom', 'UK')
+    .str.replace('Turkiye', 'Türkiye'))
+
+y = np.arange(TOP_N)
+
+print(f"Loaded {len(df)} countries")
+print(f"Global explicit:  US${G_EXP:.0f} bn")
+print(f"Global implicit:  US${G_IMP/1000:.2f} T")
+print(f"Global combined:  US${G_COMB/1000:.2f} T")
+unified[['label', 'region', 'total_explicit', 'total_implicit', 'total_combined']].iloc[::-1]
+
+sns.set_theme(style='ticks')
+matplotlib.rcParams.update({
+    'font.family':       'DejaVu Sans',
+    'font.size':          8.5,
+    'axes.titlesize':     9.5,
+    'axes.titleweight':  'bold',
+    'axes.labelsize':     8.5,
+    'xtick.labelsize':    7.8,
+    'ytick.labelsize':    8.5,
+    'legend.fontsize':    7.8,
+    'figure.dpi':         600,
+    'axes.linewidth':     0.7,
+    'axes.edgecolor':    '#2C2C2C',
+    'xtick.major.width':  0.6,
+    'ytick.major.width':  0.0,
+    'xtick.major.size':   3.0,
+    'ytick.major.size':   0.0,
+    'xtick.direction':   'out',
+    'ytick.direction':   'out',
+    'axes.spines.right':  False,
+    'axes.spines.top':    False,
+    'axes.spines.left':   False,
+    'pdf.fonttype':       42,
+    'ps.fonttype':        42,
+})
+
+# INCREASED FIGURE HEIGHT TO ACCOMMODATE VERTICAL STACK
+fig = plt.figure(figsize=(18, 28), facecolor='white')
+
+# CHANGED TO 4 ROWS
+gs  = gridspec.GridSpec(
+    4, 1, figure=fig,
+    left=0.09, right=0.97,
+    top=0.95,  bottom=0.05,
+    hspace=0.40,
+    height_ratios=[1, 1, 1, 0.8], # Adjusting ratios for the 4 panels
+)
+
+ax_exp = fig.add_subplot(gs[0, 0])
+ax_imp = fig.add_subplot(gs[1, 0])
+ax_db  = fig.add_subplot(gs[2, 0])
+ax_pie = fig.add_subplot(gs[3, 0])
+
+
+# ── Shared helpers ────────────────────────────────────────────────────────────
+def add_region_dots(ax, df_unified, y_pos, x_frac=-0.003, dot_size=7):
+    trans = matplotlib.transforms.blended_transform_factory(
+        ax.transAxes, ax.transData)
+    for i, region in enumerate(df_unified['region']):
+        col = REGION_COLORS.get(region, '#AAAAAA')
+        ax.plot(x_frac, y_pos[i], 'o', color=col, markersize=dot_size,
+                transform=trans, clip_on=False, zorder=15)
+
+def decorate_bar_ax(ax, xlabel, xlim_max, note, title):
+    ax.set_xlabel(xlabel, fontsize=8.5, labelpad=5)
+    ax.set_xlim(0, xlim_max)
+    ax.grid(axis='x', linestyle='--', linewidth=0.35, color='#CCCCCC', zorder=0)
+    ax.set_axisbelow(True)
+    ax.tick_params(axis='y', length=0, pad=10)
+    ax.text(0.985, 0.028, note,
+            transform=ax.transAxes, ha='right', va='bottom',
+            fontsize=7.4, color='#555555',
+            bbox=dict(boxstyle='round,pad=0.32', fc='#F6F6F6', ec='#CCCCCC', lw=0.5))
+    ax.set_title(title, fontsize=10.5, fontweight='bold',
+                 loc='left', pad=9, color='#111111')
+
+fuel_handles = [
+    mpatches.Patch(color=COL_PETRO, label='Petroleum'),
+    mpatches.Patch(color=COL_GAS,   label='Natural gas'),
+    mpatches.Patch(color=COL_COAL,  label='Coal'),
+]
+
+# ── Panel A — Explicit subsidies ──────────────────────────────────────────────
+pe = unified['exp_petro'].values
+ge = unified['exp_gas'].values
+ce = unified['exp_coal'].values
+te = unified['total_explicit'].values
+
+ax_exp.barh(y, pe,             color=COL_PETRO, height=0.60, zorder=3)
+ax_exp.barh(y, ge, left=pe,    color=COL_GAS,   height=0.60, zorder=3)
+ax_exp.barh(y, ce, left=pe+ge, color=COL_COAL,  height=0.60, zorder=3)
+ax_exp.set_yticks(y)
+ax_exp.set_yticklabels(unified['label'], fontsize=8.5, fontweight='500')
+add_region_dots(ax_exp, unified, y)
+
+xmax_e = te.max() * 1.23
+for i in range(TOP_N - 5, TOP_N):
+    ax_exp.text(te[i] + xmax_e * 0.012, y[i], f'${te[i]:.1f}bn',
+                va='center', ha='left', fontsize=7.0, color='#333333', fontweight='600')
+
+ax_exp.xaxis.set_major_formatter(FuncFormatter(lambda x, _: f'{x:.0f}'))
+decorate_bar_ax(ax_exp,
+    xlabel=f'Explicit subsidies (US$ billions, {YEAR})',
+    xlim_max=xmax_e,
+    note=f'Top {TOP_N} ranked by combined total  ·  Global = US${G_EXP:.0f} bn',
+    title='a   Top 15 countries — explicit fossil fuel subsidies')
+leg_e = ax_exp.legend(handles=fuel_handles, loc='lower right',
+    bbox_to_anchor=(1.0, 0.04), frameon=True, framealpha=0.92,
+    edgecolor='#CCCCCC', fontsize=7.8, ncol=3,
+    handlelength=1.0, handletextpad=0.4, columnspacing=1.0)
+leg_e.get_frame().set_linewidth(0.5)
+
+# ── Panel B — Implicit subsidies ──────────────────────────────────────────────
+pi_ = unified['imp_petro'].values
+gi  = unified['imp_gas'].values
+ci  = unified['imp_coal'].values
+ti  = unified['total_implicit'].values
+
+ax_imp.barh(y, pi_,               color=COL_PETRO, height=0.60, zorder=3)
+ax_imp.barh(y, gi,  left=pi_,     color=COL_GAS,   height=0.60, zorder=3)
+ax_imp.barh(y, ci,  left=pi_+gi,  color=COL_COAL,  height=0.60, zorder=3)
+ax_imp.set_yticks(y)
+ax_imp.set_yticklabels(unified['label'], fontsize=8.5, fontweight='500')
+add_region_dots(ax_imp, unified, y)
+
+xmax_i = ti.max() * 1.18
+for i in range(TOP_N - 5, TOP_N):
+    val = ti[i]
+    lbl = f'${val/1000:.2f}T' if val >= 1000 else f'${val:.0f}bn'
+    ax_imp.text(val + xmax_i * 0.010, y[i], lbl,
+                va='center', ha='left', fontsize=7.0, color='#333333', fontweight='600')
+
+ax_imp.xaxis.set_major_formatter(
+    FuncFormatter(lambda x, _: f'${x/1000:.0f}T' if x >= 1000 else f'{x:.0f}'))
+decorate_bar_ax(ax_imp,
+    xlabel=f'Implicit subsidies (US$ billions, {YEAR})',
+    xlim_max=xmax_i,
+    note=f'Top {TOP_N} ranked by combined total  ·  Global = US${G_IMP/1000:.2f} T',
+    title='b   Top 15 countries — implicit fossil fuel subsidies')
+leg_i = ax_imp.legend(handles=fuel_handles, loc='lower right',
+    bbox_to_anchor=(1.0, 0.04), frameon=True, framealpha=0.92,
+    edgecolor='#CCCCCC', fontsize=7.8, ncol=3,
+    handlelength=1.0, handletextpad=0.4, columnspacing=1.0)
+leg_i.get_frame().set_linewidth(0.5)
+
+# ── Panel C — Cleveland dumbbell on log scale ─────────────────────────────────
+exp_log = np.maximum(unified['total_explicit'].values, 0.05)
+imp_log = unified['total_implicit'].values
+
+for i in range(TOP_N):
+    ax_db.hlines(y[i], exp_log[i], imp_log[i],
+                 colors=COL_LINE, linewidth=1.3, zorder=2)
+ax_db.scatter(exp_log, y, s=50, color=COL_EXP, zorder=4,
+              edgecolors='white', linewidths=0.7)
+ax_db.scatter(imp_log, y, s=50, color=COL_IMP, zorder=4,
+              edgecolors='white', linewidths=0.7)
+ax_db.set_xscale('log')
+
+def log_money(x, _):
+    if x >= 1000: return f'${x/1000:.0f}T'
+    if x >= 1:    return f'${x:.0f}bn'
+    return f'${x:.1f}bn'
+
+ax_db.xaxis.set_major_formatter(FuncFormatter(log_money))
+ax_db.xaxis.set_major_locator(LogLocator(base=10, numticks=5))
+ax_db.xaxis.set_minor_locator(
+    LogLocator(base=10, subs=np.arange(2, 10) * 0.1, numticks=20))
+ax_db.xaxis.set_minor_formatter(NullFormatter())
+ax_db.set_yticks(y)
+ax_db.set_yticklabels(unified['label'], fontsize=8.0, fontweight='500')
+add_region_dots(ax_db, unified, y, x_frac=-0.004, dot_size=6.5)
+ax_db.tick_params(axis='y', length=0, pad=10)
+ax_db.grid(axis='x', which='major', linestyle='--', linewidth=0.35,
+           color='#CCCCCC', zorder=0)
+ax_db.grid(axis='x', which='minor', linestyle=':', linewidth=0.22,
+           color='#E2E2E2', zorder=0)
+ax_db.set_axisbelow(True)
+ax_db.set_xlabel(f'Total subsidies — log scale (US$ billions, {YEAR})',
+                 fontsize=8.5, labelpad=5)
+
+for i in [12, 13, 14]:
+    vi = imp_log[i]; ve = exp_log[i]
+    ax_db.text(vi * 1.15, y[i],
+               f'${vi/1000:.2f}T' if vi >= 1000 else f'${vi:.0f}bn',
+               va='center', ha='left', fontsize=6.8, color=COL_IMP, fontweight='700')
+    ax_db.text(ve * 0.82, y[i], f'${ve:.1f}bn',
+               va='center', ha='right', fontsize=6.8, color=COL_EXP, fontweight='700')
+
+db_handles = [
+    mlines.Line2D([], [], marker='o', color='w',
+                  markerfacecolor=COL_EXP, markersize=7, label='Explicit subsidies'),
+    mlines.Line2D([], [], marker='o', color='w',
+                  markerfacecolor=COL_IMP, markersize=7, label='Implicit subsidies'),
+]
+leg_db = ax_db.legend(handles=db_handles, loc='lower right',
+    bbox_to_anchor=(1.0, 0.03), frameon=True, framealpha=0.92,
+    edgecolor='#CCCCCC', fontsize=7.8, handletextpad=0.4)
+leg_db.get_frame().set_linewidth(0.5)
+ax_db.set_title('c   Explicit vs implicit: scale disparity (log)',
+    fontsize=10.5, fontweight='bold', loc='left', pad=9, color='#111111')
